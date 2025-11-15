@@ -5,6 +5,7 @@ const cors = require('cors');
 const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
+const fetch = require('node-fetch');
 
 const app = express();
 // Use Passenger/cPanel provided port if present
@@ -22,6 +23,10 @@ const DEFAULT_PPTR_ARGS = [
     '--no-zygote',
     '--disable-gpu'
 ];
+
+const HELPDESK_ENABLED = process.env.HELPDESK_ENABLED === 'true';
+const HELPDESK_CONNECTION_ID = process.env.HELPDESK_CONNECTION_ID || null;
+const HELPDESK_API_URL = process.env.HELPDESK_API_URL || null;
 
 // Middleware
 app.use(cors());
@@ -141,9 +146,82 @@ function initializeClient(connectionId, connectionName) {
 
     // Event: Message received
     client.on('message', async (msg) => {
-        console.log(`📨 [${connectionName}] Message from ${msg.from}`)
+        console.log(`📨 [${connectionName}] Message from ${msg.from}`);
 
-;
+        try {
+            if (!HELPDESK_ENABLED) {
+                return;
+            }
+
+            if (!HELPDESK_API_URL) {
+                return;
+            }
+
+            // If HELPDESK_CONNECTION_ID is set, restrict helpdesk to that
+            if (HELPDESK_CONNECTION_ID && String(connectionId) !== String(HELPDESK_CONNECTION_ID)) {
+                return;
+            }
+
+            const from = msg.from || '';
+            const body = msg.body || '';
+            const timestamp = msg.timestamp || Math.floor(Date.now() / 1000);
+            const waMessageId = msg.id && msg.id.id ? msg.id.id : null;
+
+            const payload = {
+                connection_id: connectionId,
+                from_number: from,
+                body,
+                timestamp,
+                whatsapp_message_id: waMessageId
+            };
+
+            const response = await fetch(HELPDESK_API_URL, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payload)
+            });
+
+            const httpStatus = response.status;
+
+            if (httpStatus < 200 || httpStatus >= 300) {
+                console.error(`❌ [${connectionName}] Helpdesk API HTTP ${httpStatus}`);
+                return;
+            }
+
+            let result;
+            try {
+                result = await response.json();
+            } catch (e) {
+                console.error(`❌ [${connectionName}] Helpdesk API invalid JSON`, e);
+                return;
+            }
+
+            if (!result || result.ok !== true || !Array.isArray(result.actions)) {
+                return;
+            }
+
+            for (const action of result.actions) {
+                if (!action || action.type !== 'send' || !action.to || !action.body) {
+                    continue;
+                }
+
+                let chatId = String(action.to).replace(/\D/g, '');
+                if (!chatId.endsWith('@c.us') && !chatId.endsWith('@g.us')) {
+                    chatId = chatId + '@c.us';
+                }
+
+                try {
+                    await client.sendMessage(chatId, String(action.body));
+                    console.log(`➡️ [${connectionName}] Helpdesk sent message to ${chatId}`);
+                } catch (sendErr) {
+                    console.error(`❌ [${connectionName}] Error sending helpdesk action to ${chatId}`, sendErr);
+                }
+            }
+        } catch (err) {
+            console.error(`❌ [${connectionName}] Helpdesk routing error`, err);
+        }
     });
 
     // Store client and metadata
