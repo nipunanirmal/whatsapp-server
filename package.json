@@ -17,7 +17,8 @@
     "body-parser": "^1.20.2",
     "cors": "^2.8.5",
     "qrcode": "^1.5.3",
-    "node-fetch": "^2.6.7"
+    "node-fetch": "^2.6.7",
+    "dotenv": "^16.3.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"

@@ -1,4 +1,5 @@
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
@@ -150,10 +151,12 @@ function initializeClient(connectionId, connectionName) {
 
         try {
             if (!HELPDESK_ENABLED) {
+                console.log(`ℹ️  [${connectionName}] Helpdesk disabled (HELPDESK_ENABLED=${HELPDESK_ENABLED})`);
                 return;
             }
 
             if (!HELPDESK_API_URL) {
+                console.error(`❌ [${connectionName}] Helpdesk enabled but HELPDESK_API_URL is missing`);
                 return;
             }
 
