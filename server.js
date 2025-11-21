@@ -149,6 +149,11 @@ function initializeClient(connectionId, connectionName) {
     client.on('message', async (msg) => {
         console.log(`📨 [${connectionName}] Message from ${msg.from}`);
 
+        // Only process incoming messages (ignore messages sent by this account)
+        if (msg.fromMe) {
+            return;
+        }
+
         try {
             if (!HELPDESK_ENABLED) {
                 console.log(`ℹ️  [${connectionName}] Helpdesk disabled (HELPDESK_ENABLED=${HELPDESK_ENABLED})`);
@@ -166,16 +171,54 @@ function initializeClient(connectionId, connectionName) {
             }
 
             const from = msg.from || '';
+
+            // Only handle direct 1:1 chats (ignore groups, channels, status, etc.)
+            if (!from.endsWith('@c.us')) {
+                console.log(`ℹ️  [${connectionName}] Ignoring non-direct chat: ${from}`);
+                return;
+            }
+
             const body = msg.body || '';
             const timestamp = msg.timestamp || Math.floor(Date.now() / 1000);
             const waMessageId = msg.id && msg.id.id ? msg.id.id : null;
 
+            // Try to resolve WhatsApp display name for this number
+            let fromName = null;
+            try {
+                const contact = await msg.getContact();
+                if (contact) {
+                    fromName = contact.pushname || contact.name || contact.shortName || contact.number || null;
+                }
+            } catch (contactErr) {
+                console.error(`⚠️  [${connectionName}] Could not resolve contact name for ${from}`, contactErr);
+            }
+
+            // Basic media + reply metadata (no media download here)
+            const hasMedia = Boolean(msg.hasMedia);
+            const mediaType = hasMedia ? (msg.type || null) : null;
+
+            let quotedId = null;
+            try {
+                if (msg.hasQuotedMsg) {
+                    const quoted = await msg.getQuotedMessage();
+                    if (quoted && quoted.id && quoted.id.id) {
+                        quotedId = quoted.id.id;
+                    }
+                }
+            } catch (quoteErr) {
+                console.error(`⚠️  [${connectionName}] Could not resolve quoted message for ${from}`, quoteErr);
+            }
+
             const payload = {
                 connection_id: connectionId,
                 from_number: from,
+                from_name: fromName,
                 body,
                 timestamp,
-                whatsapp_message_id: waMessageId
+                whatsapp_message_id: waMessageId,
+                has_media: hasMedia,
+                media_type: mediaType,
+                quoted_whatsapp_message_id: quotedId
             };
 
             const response = await fetch(HELPDESK_API_URL, {
@@ -206,7 +249,7 @@ function initializeClient(connectionId, connectionName) {
             }
 
             for (const action of result.actions) {
-                if (!action || action.type !== 'send' || !action.to || !action.body) {
+                if (!action || !action.type || !action.to) {
                     continue;
                 }
 
@@ -216,8 +259,19 @@ function initializeClient(connectionId, connectionName) {
                 }
 
                 try {
-                    await client.sendMessage(chatId, String(action.body));
-                    console.log(`➡️ [${connectionName}] Helpdesk sent message to ${chatId}`);
+                    if (action.type === 'send') {
+                        if (!action.body) {
+                            continue;
+                        }
+                        await client.sendMessage(chatId, String(action.body));
+                        console.log(`➡️ [${connectionName}] Helpdesk sent message to ${chatId}`);
+                    } else if (action.type === 'forward_original') {
+                        await msg.forward(chatId);
+                        console.log(`➡️ [${connectionName}] Helpdesk forwarded original message to ${chatId}`);
+                    } else {
+                        // Unknown action type; ignore
+                        continue;
+                    }
                 } catch (sendErr) {
                     console.error(`❌ [${connectionName}] Error sending helpdesk action to ${chatId}`, sendErr);
                 }
