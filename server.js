@@ -65,6 +65,7 @@ function initializeClient(connectionId, connectionName) {
         status: 'initializing',
         qrCode: null,
         qrImage: null,
+        lastQrCode: null,
         info: null,
         lastError: null,
         createdAt: new Date().toISOString(),
@@ -88,10 +89,43 @@ function initializeClient(connectionId, connectionName) {
         puppeteer: puppeteerOptions
     });
 
+    let cleanupInProgress = false;
+
+    async function cleanupClient(reason) {
+        if (cleanupInProgress) {
+            return;
+        }
+        cleanupInProgress = true;
+
+        try {
+            metadata.status = 'disconnected';
+            metadata.info = null;
+            metadata.qrCode = null;
+            metadata.qrImage = null;
+            metadata.lastQrCode = null;
+            metadata.lastError = reason ? String(reason) : null;
+
+            await client.destroy();
+        } catch (err) {
+            console.error(`❌ [${connectionName}] Error during cleanup:`, err);
+        } finally {
+            clients.delete(connectionId);
+        }
+    }
+
     // Event: QR Code received
     client.on('qr', async (qr) => {
+        if (metadata.status === 'connected') {
+            return;
+        }
+
+        if (metadata.lastQrCode && metadata.lastQrCode === qr) {
+            return;
+        }
+
         console.log(`📱 [${connectionName}] QR Code received!`);
         metadata.qrCode = qr;
+        metadata.lastQrCode = qr;
         metadata.status = 'qr_ready';
         
         try {
@@ -104,11 +138,12 @@ function initializeClient(connectionId, connectionName) {
     });
 
     // Event: Client ready
-    client.on('ready', async () => {
+    client.once('ready', async () => {
         console.log(`✅ [${connectionName}] WhatsApp Client is ready!`);
         metadata.status = 'connected';
         metadata.qrCode = null;
         metadata.qrImage = null;
+        metadata.lastQrCode = null;
         metadata.connectedAt = new Date().toISOString();
         
         try {
@@ -125,7 +160,7 @@ function initializeClient(connectionId, connectionName) {
     });
 
     // Event: Authentication success
-    client.on('authenticated', () => {
+    client.once('authenticated', () => {
         console.log(`🔐 [${connectionName}] Authentication successful!`);
     });
 
@@ -136,13 +171,17 @@ function initializeClient(connectionId, connectionName) {
         metadata.qrCode = null;
         metadata.qrImage = null;
         metadata.lastError = typeof msg === 'string' ? msg : (msg?.message || 'auth_failure');
+
+        // Force a clean slate so the dashboard can recreate the connection.
+        cleanupClient(metadata.lastError);
     });
 
     // Event: Disconnected
     client.on('disconnected', (reason) => {
         console.log(`⚠️  [${connectionName}] Client disconnected:`, reason);
-        metadata.status = 'disconnected';
-        metadata.info = null;
+
+        // Destroy and remove from map to avoid stale clients and repeated QR/auth loops.
+        cleanupClient(reason);
     });
 
     // Event: Message received
@@ -289,6 +328,7 @@ function initializeClient(connectionId, connectionName) {
         console.error(`❌ [${connectionName}] Error initializing:`, err);
         metadata.status = 'error';
         metadata.lastError = err?.message || String(err);
+        cleanupClient(metadata.lastError);
     });
 
     return { success: true, metadata };
