@@ -68,6 +68,8 @@ function initializeClient(connectionId, connectionName) {
         lastQrCode: null,
         info: null,
         lastError: null,
+        hasAuthenticated: false,
+        hasReady: false,
         createdAt: new Date().toISOString(),
         connectedAt: null
     };
@@ -89,13 +91,11 @@ function initializeClient(connectionId, connectionName) {
         puppeteer: puppeteerOptions
     });
 
-    let cleanupInProgress = false;
-
-    async function cleanupClient(reason) {
-        if (cleanupInProgress) {
+    async function destroyAndRemoveClient(reason) {
+        const current = clients.get(connectionId);
+        if (!current || current.client !== client) {
             return;
         }
-        cleanupInProgress = true;
 
         try {
             metadata.status = 'disconnected';
@@ -104,10 +104,12 @@ function initializeClient(connectionId, connectionName) {
             metadata.qrImage = null;
             metadata.lastQrCode = null;
             metadata.lastError = reason ? String(reason) : null;
+            metadata.hasAuthenticated = false;
+            metadata.hasReady = false;
 
             await client.destroy();
         } catch (err) {
-            console.error(`❌ [${connectionName}] Error during cleanup:`, err);
+            console.error(`❌ [${connectionName}] Error during destroy:`, err);
         } finally {
             clients.delete(connectionId);
         }
@@ -138,7 +140,11 @@ function initializeClient(connectionId, connectionName) {
     });
 
     // Event: Client ready
-    client.once('ready', async () => {
+    client.on('ready', async () => {
+        if (metadata.hasReady) {
+            return;
+        }
+        metadata.hasReady = true;
         console.log(`✅ [${connectionName}] WhatsApp Client is ready!`);
         metadata.status = 'connected';
         metadata.qrCode = null;
@@ -160,7 +166,11 @@ function initializeClient(connectionId, connectionName) {
     });
 
     // Event: Authentication success
-    client.once('authenticated', () => {
+    client.on('authenticated', () => {
+        if (metadata.hasAuthenticated) {
+            return;
+        }
+        metadata.hasAuthenticated = true;
         console.log(`🔐 [${connectionName}] Authentication successful!`);
     });
 
@@ -173,15 +183,23 @@ function initializeClient(connectionId, connectionName) {
         metadata.lastError = typeof msg === 'string' ? msg : (msg?.message || 'auth_failure');
 
         // Force a clean slate so the dashboard can recreate the connection.
-        cleanupClient(metadata.lastError);
+        destroyAndRemoveClient(metadata.lastError);
     });
 
     // Event: Disconnected
     client.on('disconnected', (reason) => {
         console.log(`⚠️  [${connectionName}] Client disconnected:`, reason);
 
-        // Destroy and remove from map to avoid stale clients and repeated QR/auth loops.
-        cleanupClient(reason);
+        // Keep the client instance in-memory for transient disconnects.
+        // Only a user-initiated delete/logout should fully destroy session.
+        metadata.status = 'disconnected';
+        metadata.info = null;
+        metadata.qrCode = null;
+        metadata.qrImage = null;
+        metadata.lastQrCode = null;
+        metadata.lastError = reason ? String(reason) : null;
+        metadata.hasAuthenticated = false;
+        metadata.hasReady = false;
     });
 
     // Event: Message received
@@ -328,7 +346,7 @@ function initializeClient(connectionId, connectionName) {
         console.error(`❌ [${connectionName}] Error initializing:`, err);
         metadata.status = 'error';
         metadata.lastError = err?.message || String(err);
-        cleanupClient(metadata.lastError);
+        destroyAndRemoveClient(metadata.lastError);
     });
 
     return { success: true, metadata };
