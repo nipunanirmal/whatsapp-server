@@ -361,6 +361,20 @@ function getClient(connectionId) {
     return { success: true, ...connection };
 }
 
+// Helper: Remove LocalAuth session directory for a connection
+function removeSessionDir(connectionId) {
+    // LocalAuth stores data under <dataPath>/session-<clientId>
+    const sessionDir = path.resolve(WA_SESSION_PATH, `session-${connectionId}`);
+    try {
+        if (fs.existsSync(sessionDir)) {
+            fs.rmSync(sessionDir, { recursive: true, force: true });
+            console.log(`🧹 Removed session directory: ${sessionDir}`);
+        }
+    } catch (err) {
+        console.error(`⚠️  Failed to remove session dir ${sessionDir}:`, err);
+    }
+}
+
 // Helper: Delete connection
 async function deleteConnection(connectionId) {
     const connection = clients.get(connectionId);
@@ -370,13 +384,17 @@ async function deleteConnection(connectionId) {
 
     try {
         await connection.client.destroy();
-        clients.delete(connectionId);
-        console.log(`🗑️  Connection ${connectionId} deleted`);
-        return { success: true };
     } catch (err) {
-        console.error(`Error deleting connection ${connectionId}:`, err);
-        return { success: false, error: err.message };
+        console.error(`Error destroying connection ${connectionId}:`, err);
     }
+
+    clients.delete(connectionId);
+
+    // Remove the LocalAuth session folder so next create starts fresh
+    removeSessionDir(connectionId);
+
+    console.log(`🗑️  Connection ${connectionId} deleted`);
+    return { success: true };
 }
 
 // ==================== API ENDPOINTS ====================
@@ -552,9 +570,11 @@ app.post('/api/connections/:id/logout', async (req, res) => {
     }
     
     try {
-        await result.client.logout();
-        result.metadata.status = 'disconnected';
-        result.metadata.info = null;
+        // Logout first (tells WhatsApp to unpair), then destroy and clean session
+        try { await result.client.logout(); } catch (_) { /* ignore */ }
+        try { await result.client.destroy(); } catch (_) { /* ignore */ }
+        clients.delete(id);
+        removeSessionDir(id);
         
         res.json({
             success: true,
